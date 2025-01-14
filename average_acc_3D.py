@@ -39,7 +39,7 @@ class Config:
     }
     DEFAULTS = {
         'data_flag': 'organmnist3d_64',
-        'num_epochs': 75,
+        'num_epochs': 100,
         'batch_size': 8,
         'num_workers': 8,      # Default number of workers
         'conv': 'crossdconv',  # Default convolution option
