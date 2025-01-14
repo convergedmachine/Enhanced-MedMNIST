@@ -218,8 +218,7 @@ class BiomedicalPresetTrain:
     """
     def __init__(self, mean, std, flip_prob=0.5, rotate_prob=0.5, zoom_prob=0.5, noise_prob=0.5, shift_intensity_prob=0.5):
         self.transforms = Compose([
-            ScaleIntensity(),
-            NormalizeIntensity(subtrahend=mean, divisor=std),
+            NormalizeIntensity(subtrahend=mean, divisor=std, channel_wise=True),
             RandFlip(spatial_axis=0, prob=flip_prob),
             RandRotate(range_x=15, prob=rotate_prob),  # Random rotation within ±15 degrees
             RandZoom(min_zoom=0.9, max_zoom=1.1, prob=zoom_prob),  # Random zoom between 90% and 110%
@@ -237,8 +236,7 @@ class BiomedicalPresetEval:
     """
     def __init__(self, mean, std):
         self.transforms = Compose([
-            ScaleIntensity(),
-            NormalizeIntensity(subtrahend=mean, divisor=std),
+            NormalizeIntensity(subtrahend=mean, divisor=std, channel_wise=True),
             EnsureType()
         ])
 
@@ -505,6 +503,7 @@ def main(args):
 
     data = np.load(path_to_npz)
     images = data['images'] / 255.0  # Assuming images are in [0, 255]
+    images = np.stack([images, images, images], axis=1)
     labels_all = data['labels'].squeeze()
 
     # Ensure correct image shape
@@ -522,11 +521,11 @@ def main(args):
 
     # Define mean and std based on conv option
     if conv == "imagenet":
-        mean = np.array([0.485, 0.456, 0.406]).mean()
-        std = np.array([0.229, 0.224, 0.225]).mean()
+        mean = np.array([0.485, 0.456, 0.406])
+        std = np.array([0.229, 0.224, 0.225])
     else:
-        mean = np.array([0.3162, 0.3162, 0.3162]).mean()
-        std = np.array([0.3213, 0.3213, 0.3213]).mean()
+        mean = np.array([0.3162, 0.3162, 0.3162])
+        std = np.array([0.3213, 0.3213, 0.3213])
     print(f"Mean: {mean}")
     print(f"Std: {std}")
 
