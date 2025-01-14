@@ -6,24 +6,26 @@ from copy import deepcopy
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-import torchvision.transforms as T
-from torchvision.models import resnet18, ResNet18_Weights
 
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import KFold
 
-from torchvision.transforms import (
-    InterpolationMode,
+from torchvision.models import resnet18, ResNet18_Weights
+from acsconv.converters import ACSConverter  # For converting ResNet to ResNet3D
+
+from monai.transforms import (
     Compose,
-    RandomResizedCrop,
-    RandomHorizontalFlip,
-    ColorJitter,
-    Normalize,
-    Resize,
-    CenterCrop,
+    ScaleIntensity,
+    NormalizeIntensity,
+    RandFlip,
+    RandRotate,
+    RandZoom,
+    RandGaussianNoise,
+    RandShiftIntensity,
+    EnsureType
 )
 
-from replace_conv_layers import replace_conv_layers  # Ensure this module is available
+from replace_conv_layers import convert2threed  # Ensure this module is available
 
 # -------------------------------
 # Configuration
@@ -32,14 +34,15 @@ class Config:
     SEED = 42
     FLOAT32_MATMUL_PRECISION = 'high'
     WEIGHTS_PATH = {
-        'radimagenet': "../_weights/R18.pth",
-        'crossdconv': "../_weights/CDConvR18.pth"
+        'crossdconv': "../_weights/CDConvR18.pth",
+        'acsconv': "../_weights/R18.pth"
     }
     DEFAULTS = {
-        'data_flag': 'breastmnist_224',
+        'data_flag': 'organmnist3d_64',
         'num_epochs': 75,
         'batch_size': 8,
-        'conv': 'crossdconv',
+        'num_workers': 8,      # Default number of workers
+        'conv': 'crossdconv',  # Default convolution option
     }
     FINETUNING_STAGES = [
         {'epoch': 10, 'unfreeze_layers': ['layer4', 'fc']},
@@ -64,6 +67,9 @@ def set_seed(seed):
     # Ensuring deterministic behavior
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    # For Python random module
+    import random
+    random.seed(seed)
 
 set_seed(Config.SEED)
 torch.set_float32_matmul_precision(Config.FLOAT32_MATMUL_PRECISION)
@@ -71,41 +77,91 @@ torch.set_float32_matmul_precision(Config.FLOAT32_MATMUL_PRECISION)
 # -------------------------------
 # 3. MODEL CREATION
 # -------------------------------
-def create_model(n_classes, conv_opt=False, weights_path=None):
+def create_model(n_classes, conv_opt='imagenet', weights_path=None):
     """
-    Creates a ResNet-18 model with optional convolution layer replacements.
-    
+    Creates a ResNet-18 3D model with optional convolution layer replacements.
+
     Args:
         n_classes (int): Number of output classes.
-        conv_opt (str or bool): Option for convolution layer modification.
-        weights_path (str): Path to the weights file.
-        
+        conv_opt (str): Convolution option. One of 'crossdconv', 'acsconv', 'imagenet'.
+        weights_path (str, optional): Path to the weights file.
+
     Returns:
-        model (nn.Module): The modified ResNet-18 model.
+        model (nn.Module): The modified ResNet-18 3D model.
     """
+    # Initialize ResNet-18 with ImageNet weights
     model = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
     num_features = model.fc.in_features
-    model.fc = nn.Linear(num_features, n_classes)
+    model.fc = nn.Linear(num_features, n_classes)  # Modify the final layer
 
-    if conv_opt in Config.WEIGHTS_PATH:
-        if conv_opt == 'crossdconv':
-            replace_conv_layers(model)
+    # Handle convolution options
+    if conv_opt == 'crossdconv':
+        # Convert to 3D using CrossDConv
+        convert2threed(model)
+        weights_to_load = weights_path or Config.WEIGHTS_PATH['crossdconv']
+
         try:
-            ckpt = torch.load(weights_path or Config.WEIGHTS_PATH[conv_opt], map_location='cpu')
+            ckpt = torch.load(weights_to_load, map_location='cpu')
             state_dict = ckpt.get("model", ckpt)
+
+            # Modify state_dict keys if necessary
+            weights = {
+                key.replace("weights_3d", "weight"): value 
+                for key, value in state_dict.items()
+            }
+
+            # Remove weights related to the fully connected layer
+            keys_to_remove = ['fc.weight', 'fc.bias']
+            for key in keys_to_remove:
+                weights.pop(key, None)
+
+            # Exclude rotation parameters and batch norm layers if present
+            weights = {
+                key: value for key, value in weights.items()
+                if 'rotation_params' not in key and 'bn' not in key
+            }
+
+            # Load the modified state_dict
+            missing_keys, unexpected_keys = model.load_state_dict(weights, strict=False)
+            print(f"Loaded CrossDConv weights with missing keys: {missing_keys}, unexpected keys: {unexpected_keys}")
+        except FileNotFoundError:
+            print(f"CrossDConv weights not found at {weights_to_load}. Proceeding without loading pre-trained weights.")
+        except Exception as e:
+            print(f"Error loading CrossDConv weights: {e}")
+
+    elif conv_opt == 'acsconv':
+        # Apply ACSConv conversion
+        weights_to_load = weights_path or Config.WEIGHTS_PATH['acsconv']
+
+        try:
+            ckpt = torch.load(weights_to_load, map_location='cpu')
+            state_dict = ckpt.get("model", ckpt)
+
+            # Modify state_dict keys if necessary
             weights = {
                 key.replace("_orig_mod.", ""): value 
                 for key, value in state_dict.items()
             }
-            keys_to_remove=['fc.weight', 'fc.bias']
+
+            # Remove weights related to the fully connected layer
+            keys_to_remove = ['fc.weight', 'fc.bias']
             for key in keys_to_remove:
                 weights.pop(key, None)
+
+            # Load the modified state_dict
             missing_keys, unexpected_keys = model.load_state_dict(weights, strict=False)
-            print(f"Loaded weights with missing keys: {missing_keys}, unexpected keys: {unexpected_keys}")
+            model = ACSConverter(model)
+            print(f"Loaded ACSConv weights with missing keys: {missing_keys}, unexpected keys: {unexpected_keys}")
         except FileNotFoundError:
-            print(f"Weight file for '{conv_opt}' not found at {weights_path or Config.WEIGHTS_PATH[conv_opt]}.")
-    elif conv_opt:
-        print(f"Unknown conv_opt '{conv_opt}'. Proceeding with standard ResNet-18.")
+            print(f"ACSConv weights not found at {weights_to_load}. Proceeding without loading pre-trained weights.")
+        except Exception as e:
+            print(f"Error loading ACSConv weights: {e}")
+
+    elif conv_opt == 'imagenet':
+        model = ACSConverter(model)
+        print("Using 3D ResNet-18 with ImageNet weights.")
+    else:
+        raise ValueError(f"Unsupported conv_opt '{conv_opt}'. Choose from 'crossdconv', 'acsconv', 'imagenet'.")
 
     return model
 
@@ -119,9 +175,9 @@ class ArrayDataset(Dataset):
     def __init__(self, images, labels, transform=None):
         """
         Initializes the dataset.
-        
+
         Args:
-            images (np.ndarray): Array of images.
+            images (np.ndarray): Array of images with shape (N, D, H, W).
             labels (np.ndarray): Array of labels.
             transform (callable, optional): Transformations to apply.
         """
@@ -129,12 +185,15 @@ class ArrayDataset(Dataset):
         self.labels = labels
         self.transform = transform
 
-        if self.images.ndim == 3:
-            # Expand to (N, 1, H, W) and repeat channels to make it (N, 3, H, W)
+        if self.images.ndim == 4:
+            # Expand to (N, 1, D, H, W) and repeat channels to make it (N, 3, D, H, W)
             self.images = np.expand_dims(self.images, 1)
             self.images = np.repeat(self.images, 3, axis=1)
-        elif self.images.ndim != 4 or self.images.shape[1] != 3:
-            raise ValueError("Images should have shape (N, C, H, W) with C=3 or (N, H, W).")
+        elif self.images.ndim == 5 and self.images.shape[1] == 3:
+            # Already in (N, C, D, H, W)
+            pass
+        else:
+            raise ValueError("Images should have shape (N, C, D, H, W) with C=3 or (N, D, H, W).")
 
     def __len__(self):
         return len(self.images)
@@ -155,30 +214,32 @@ class ArrayDataset(Dataset):
 # -------------------------------
 class BiomedicalPresetTrain:
     """
-    Preset transformations for training.
+    Preset transformations for training using MONAI.
     """
-    def __init__(self, crop_size, mean, std, interpolation=InterpolationMode.BILINEAR, hflip_prob=0.5, color_jitter_params=None):
-        transforms = [
-            RandomResizedCrop(crop_size, interpolation=interpolation, antialias=True),
-            RandomHorizontalFlip(p=hflip_prob)
-        ]
-        if color_jitter_params:
-            transforms.append(ColorJitter(**color_jitter_params))
-        transforms.append(Normalize(mean=mean, std=std))
-        self.transforms = Compose(transforms)
+    def __init__(self, mean, std, flip_prob=0.5, rotate_prob=0.5, zoom_prob=0.5, noise_prob=0.5, shift_intensity_prob=0.5):
+        self.transforms = Compose([
+            ScaleIntensity(),
+            NormalizeIntensity(subtrahend=mean, divisor=std),
+            RandFlip(spatial_axis=0, prob=flip_prob),
+            RandRotate(range_x=15, prob=rotate_prob),  # Random rotation within ±15 degrees
+            RandZoom(min_zoom=0.9, max_zoom=1.1, prob=zoom_prob),  # Random zoom between 90% and 110%
+            RandGaussianNoise(prob=noise_prob),  # Add random Gaussian noise
+            RandShiftIntensity(offsets=0.1, prob=shift_intensity_prob),  # Random intensity shift
+            EnsureType()
+        ])
 
     def __call__(self, img):
         return self.transforms(img)
 
 class BiomedicalPresetEval:
     """
-    Preset transformations for evaluation.
+    Preset transformations for evaluation using MONAI.
     """
-    def __init__(self, crop_size, resize_size, mean, std, interpolation=InterpolationMode.BILINEAR):
+    def __init__(self, mean, std):
         self.transforms = Compose([
-            Resize(resize_size, interpolation=interpolation, antialias=True),
-            CenterCrop(crop_size),
-            Normalize(mean=mean, std=std)
+            ScaleIntensity(),
+            NormalizeIntensity(subtrahend=mean, divisor=std),
+            EnsureType()
         ])
 
     def __call__(self, img):
@@ -187,14 +248,17 @@ class BiomedicalPresetEval:
 # -------------------------------
 # 5a. FINETUNING SCHEDULER
 # -------------------------------
+import torch.nn as nn
+
 class FinetuningScheduler:
     """
     Scheduler to manage progressive finetuning by unfreezing layers at specified epochs.
+    Ensures that all Batch Normalization layers remain trainable throughout training.
     """
     def __init__(self, model, stages):
         """
         Initializes the finetuning scheduler.
-        
+
         Args:
             model (nn.Module): The model to finetune.
             stages (list of dict): Each dict contains 'epoch' and 'unfreeze_layers' keys.
@@ -203,14 +267,29 @@ class FinetuningScheduler:
         self.stages = sorted(stages, key=lambda x: x['epoch'])
         self.current_stage = 0
 
+        # Ensure BatchNorm layers are always trainable
+        self._keep_batch_norm_trainable()
+
+    def _keep_batch_norm_trainable(self):
+        """
+        Sets requires_grad=True for all BatchNorm layers to keep them trainable.
+        """
+        # Define BatchNorm layer types
+        bn_types = (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)
+
+        for module in self.model.modules():
+            if isinstance(module, bn_types):
+                for param in module.parameters():
+                    param.requires_grad = True
+
     def step(self, epoch, optimizer):
         """
-        Checks if a new stage should be activated at the current epoch and updates the optimizer.
-        
+        Checks if a new finetuning stage should be activated at the current epoch and updates the optimizer.
+
         Args:
             epoch (int): Current epoch number.
             optimizer (torch.optim.Optimizer): Current optimizer.
-            
+
         Returns:
             optimizer (torch.optim.Optimizer): Updated optimizer if layers are unfrozen.
         """
@@ -220,9 +299,17 @@ class FinetuningScheduler:
             print(f"Unfreezing layers: {layers_to_unfreeze}")
 
             for layer_name in layers_to_unfreeze:
-                layer = dict([*self.model.named_modules()])[layer_name]
+                try:
+                    layer = dict([*self.model.named_modules()])[layer_name]
+                except KeyError:
+                    print(f"Layer '{layer_name}' not found in the model. Skipping.")
+                    continue
+
                 for param in layer.parameters():
                     param.requires_grad = True
+
+            # Reaffirm that BatchNorm layers remain trainable
+            self._keep_batch_norm_trainable()
 
             # Update optimizer to include newly unfrozen parameters
             optimizer = self.update_optimizer(optimizer)
@@ -233,10 +320,28 @@ class FinetuningScheduler:
     def update_optimizer(self, optimizer):
         """
         Updates the optimizer to include parameters that are now trainable.
-        
+
         Args:
             optimizer (torch.optim.Optimizer): Current optimizer.
+
+        Returns:
+            optimizer (torch.optim.Optimizer): Updated optimizer.
+        """
+        # Collect all parameters that require gradients
+        trainable_params = [param for param in self.model.parameters() if param.requires_grad]
         
+        # Create a new optimizer with the updated trainable parameters
+        optimizer = torch.optim.Adam(trainable_params, lr=optimizer.param_groups[0]['lr'])
+        print("Optimizer updated to include newly trainable parameters.")
+        return optimizer
+
+    def update_optimizer(self, optimizer):
+        """
+        Updates the optimizer to include parameters that are now trainable.
+
+        Args:
+            optimizer (torch.optim.Optimizer): Current optimizer.
+
         Returns:
             optimizer (torch.optim.Optimizer): Updated optimizer.
         """
@@ -274,13 +379,13 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device):
 def evaluate(model, data_loader, device, criterion):
     """
     Evaluates the model on the given data loader.
-    
+
     Args:
         model (nn.Module): The trained model.
         data_loader (DataLoader): DataLoader for evaluation.
         device (torch.device): Device to perform computations on.
         criterion (nn.Module): Loss function.
-    
+
     Returns:
         avg_loss (float): Average loss over the dataset.
         accuracy (float): Accuracy score.
@@ -313,25 +418,29 @@ def evaluate(model, data_loader, device, criterion):
 def train_model(conv_opt, n_classes, train_loader, val_loader, num_epochs, device, weights_path=None):
     """
     Creates and trains the model with progressive finetuning.
-    
+
     Args:
-        conv_opt (str or bool): Convolution option for model creation.
+        conv_opt (str): Convolution option ('crossdconv', 'acsconv', 'imagenet').
         n_classes (int): Number of output classes.
         train_loader (DataLoader): DataLoader for training.
         val_loader (DataLoader): DataLoader for validation.
         num_epochs (int): Number of training epochs.
         device (torch.device): Device to train on.
         weights_path (str, optional): Path to custom weights file.
-    
+
     Returns:
         model (nn.Module): Trained model with best validation accuracy.
     """
     model = create_model(n_classes, conv_opt=conv_opt, weights_path=weights_path).to(device)
 
-    # Initially, freeze all layers except the final fully connected layer
-    for name, param in model.named_parameters():
-        if "fc" not in name:
-            param.requires_grad = False
+    if conv_opt != 'imagenet':
+        # For conv_opt other than 'imagenet', freeze all layers except the final fully connected layer
+        for name, param in model.named_parameters():
+            if "fc" not in name:
+                param.requires_grad = False
+    else:
+        # For 'imagenet', you might choose to fine-tune the entire model or freeze specific layers
+        print("Training with standard ImageNet weights. Consider freezing layers if necessary.")
 
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=0.001)
@@ -385,6 +494,7 @@ def main(args):
     batch_size = args.batch_size
     conv = args.conv
     weights_path = args.weights_path
+    num_workers = Config.DEFAULTS['num_workers']
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
@@ -394,54 +504,41 @@ def main(args):
         raise FileNotFoundError(f"Data file not found at {path_to_npz}")
 
     data = np.load(path_to_npz)
-    images = data['images'] / 255.0
+    images = data['images'] / 255.0  # Assuming images are in [0, 255]
     labels_all = data['labels'].squeeze()
 
     # Ensure correct image shape
-    if images.ndim == 3:
+    if images.ndim == 4:
         pass  # Already handled in ArrayDataset
-    elif images.ndim == 4 and images.shape[1] != 3:
-        images = np.transpose(images, [0, 3, 1, 2])
-    elif images.ndim != 4:
-        raise ValueError("Unsupported image shape. Expected 3D or 4D array.")
+    elif images.ndim == 5 and images.shape[1] == 3:
+        pass  # Already handled in ArrayDataset
+    elif images.ndim == 5 and images.shape[1] != 3:
+        images = np.transpose(images, [0, 4, 1, 2, 3])  # From (N, D, H, W, C) to (N, C, D, H, W)
+    else:
+        raise ValueError("Unsupported image shape. Expected 4D or 5D array.")
 
     n_classes = len(np.unique(labels_all))
     print(f"Number of classes: {n_classes}")
 
-    # Compute mean and std
-    #if images.ndim == 4:
-    #    mean = images.mean(axis=(0, 2, 3))
-    #    std = images.std(axis=(0, 2, 3))
-    #else:
-    #    mean = images.mean()
-    #    std = images.std()
-    
-    if args.conv == "imagenet":
-        mean = [0.485, 0.456, 0.406]
-        std = [0.229, 0.224, 0.225]
+    # Define mean and std based on conv option
+    if conv == "imagenet":
+        mean = np.array([0.485, 0.456, 0.406]).mean()
+        std = np.array([0.229, 0.224, 0.225]).mean()
     else:
-        mean = [0.3162, 0.3162, 0.3162]
-        std = [0.3213, 0.3213, 0.3213]
-    print(f"Computed mean: {mean}")
-    print(f"Computed std: {std}")
-
-    # Define image sizes
-    crop_size = 224
-    resize_size = 256
+        mean = np.array([0.3162, 0.3162, 0.3162]).mean()
+        std = np.array([0.3213, 0.3213, 0.3213]).mean()
+    print(f"Mean: {mean}")
+    print(f"Std: {std}")
 
     # Initialize transformation presets
     train_transform = BiomedicalPresetTrain(
-        crop_size=crop_size,
-        mean=mean,
+        mean=mean,  # Lists are passed directly
         std=std,
-        hflip_prob=0.5,
-        color_jitter_params={'brightness': 0.4, 'contrast': 0.4, 'saturation': 0.4, 'hue': 0.1}
+        flip_prob=0.5
     )
 
     eval_transform = BiomedicalPresetEval(
-        crop_size=crop_size,
-        resize_size=resize_size,
-        mean=mean,
+        mean=mean,  # Lists are passed directly
         std=std
     )
 
@@ -492,21 +589,21 @@ def main(args):
                 dataset=train_dataset,
                 batch_size=batch_size,
                 shuffle=True,
-                num_workers=4,
+                num_workers=num_workers,
                 pin_memory=True
             )
             val_loader = DataLoader(
                 dataset=val_dataset,
                 batch_size=batch_size,
                 shuffle=False,
-                num_workers=4,
+                num_workers=num_workers,
                 pin_memory=True
             )
             test_loader = DataLoader(
                 dataset=test_dataset,
                 batch_size=batch_size,
                 shuffle=False,
-                num_workers=4,
+                num_workers=num_workers,
                 pin_memory=True
             )
 
@@ -553,14 +650,17 @@ def inspect_batch(data_loader):
         print("DataLoader is empty.")
         return
 
-    print(f'Features shape: {features.shape}')
-    print(f'Labels shape: {labels.shape}')
+    print("\nData statistics:")
+    print(f"Type: {type(features)} {features.dtype}")
+    print(f"Shape: {features.shape}")
+    print(f"Value range: ({features.min().item()}, {features.max().item()})")
 
-    if features.ndim == 4:
+    if features.ndim == 5:
         print(f'Feature batch size: {features.size(0)}')
         print(f'Number of channels: {features.size(1)}')
-        print(f'Image height: {features.size(2)}')
-        print(f'Image width: {features.size(3)}')
+        print(f'Depth: {features.size(2)}')
+        print(f'Height: {features.size(3)}')
+        print(f'Width: {features.size(4)}')
         print(f'Feature pixel value range: {features.min().item()} to {features.max().item()}')
 
     unique_labels, counts = torch.unique(labels, return_counts=True)
@@ -572,17 +672,20 @@ def inspect_batch(data_loader):
 # 8. ENTRY POINT
 # -------------------------------
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='CrossDConv/ResNet-18 with Progressive Finetuning and 3 Trials x 5-Fold CV on npz data')
+    parser = argparse.ArgumentParser(description='CrossDConv/ACSConv/ResNet-18 3D with Progressive Finetuning and 3 Trials x 5-Fold CV on npz data')
     parser.add_argument('--data_flag',  default=Config.DEFAULTS['data_flag'], type=str, 
                         help='Which .npz file to load (prefix or dataset name).')
     parser.add_argument('--num_epochs', default=Config.DEFAULTS['num_epochs'], type=int, 
                         help='Number of epochs for training.')
     parser.add_argument('--batch_size', default=Config.DEFAULTS['batch_size'], type=int,
                         help='Batch size.')
-    parser.add_argument('--conv',       default=Config.DEFAULTS['conv'], type=str,
-                        help='Choose convolution option (e.g., "regular", "crossdconv").')
+    parser.add_argument('--conv',       default=Config.DEFAULTS['conv'], type=str, 
+                        choices=['crossdconv', 'acsconv', 'imagenet'],
+                        help='Choose convolution option: "crossdconv", "acsconv", or "imagenet".')
     parser.add_argument('--weights_path', default=None, type=str,
                         help='Custom path to weights file if different from default.')
+    parser.add_argument('--num_workers', default=Config.DEFAULTS['num_workers'], type=int,
+                        help='Number of worker processes for DataLoader.')    
     args = parser.parse_args()
 
     main(args)
