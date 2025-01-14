@@ -37,7 +37,7 @@ class Config:
     }
     DEFAULTS = {
         'data_flag': 'breastmnist_224',
-        'num_epochs': 75,
+        'num_epochs': 100,
         'batch_size': 8,
         'conv': 'crossdconv',
     }
