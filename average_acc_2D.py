@@ -37,16 +37,18 @@ class Config:
     }
     DEFAULTS = {
         'data_flag': 'breastmnist_224',
-        'num_epochs': 100,
+        'num_epochs': 15,
         'batch_size': 8,
+        'num_workers': 6,      # Default number of workers
         'conv': 'crossdconv',
     }
     FINETUNING_STAGES = [
-        {'epoch': 10, 'unfreeze_layers': ['layer4', 'fc']},
-        {'epoch': 20, 'unfreeze_layers': ['layer3']},
-        {'epoch': 30, 'unfreeze_layers': ['layer2']},
-        {'epoch': 40, 'unfreeze_layers': ['layer1']},
-        {'epoch': 50, 'unfreeze_layers': ['conv1', 'bn1']},
+        {'epoch': 10, 'unfreeze_layers': ['fc']},
+        #{'epoch': 10, 'unfreeze_layers': ['layer4', 'fc']},
+        #{'epoch': 20, 'unfreeze_layers': ['layer3']},
+        #{'epoch': 30, 'unfreeze_layers': ['layer2']},
+        #{'epoch': 40, 'unfreeze_layers': ['layer1']},
+        #{'epoch': 50, 'unfreeze_layers': ['conv1', 'bn1']},
         # Add more stages as needed
     ]
 
@@ -324,7 +326,7 @@ def train_model(conv_opt, n_classes, train_loader, val_loader, num_epochs, devic
         weights_path (str, optional): Path to custom weights file.
     
     Returns:
-        model (nn.Module): Trained model with best validation accuracy.
+        model (nn.Module): Trained model with best validation loss.
     """
     model = create_model(n_classes, conv_opt=conv_opt, weights_path=weights_path).to(device)
 
@@ -334,7 +336,7 @@ def train_model(conv_opt, n_classes, train_loader, val_loader, num_epochs, devic
             param.requires_grad = False
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=0.001)
+    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=0.001)
     scheduler = torch.optim.lr_scheduler.MultiStepLR(
         optimizer,
         milestones=[int(0.5 * num_epochs), int(0.75 * num_epochs)],
@@ -345,7 +347,7 @@ def train_model(conv_opt, n_classes, train_loader, val_loader, num_epochs, devic
     finetuning_scheduler = FinetuningScheduler(model, Config.FINETUNING_STAGES)
 
     best_model_wts = deepcopy(model.state_dict())
-    best_acc = 0.0
+    lowest_val_loss = float('inf')
 
     for epoch in range(1, num_epochs + 1):
         # Check for finetuning stage updates
@@ -360,9 +362,9 @@ def train_model(conv_opt, n_classes, train_loader, val_loader, num_epochs, devic
         # Validate
         val_loss, val_acc = evaluate(model, val_loader, device, criterion)
 
-        # Checkpoint if best
-        if val_acc > best_acc:
-            best_acc = val_acc
+        # Checkpoint if lowest validation loss
+        if val_loss < lowest_val_loss:
+            lowest_val_loss = val_loss
             best_model_wts = deepcopy(model.state_dict())
 
         # Log epoch metrics
@@ -385,6 +387,7 @@ def main(args):
     batch_size = args.batch_size
     conv = args.conv
     weights_path = args.weights_path
+    num_workers = Config.DEFAULTS['num_workers']
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
@@ -492,21 +495,21 @@ def main(args):
                 dataset=train_dataset,
                 batch_size=batch_size,
                 shuffle=True,
-                num_workers=4,
+                num_workers=num_workers,
                 pin_memory=True
             )
             val_loader = DataLoader(
                 dataset=val_dataset,
                 batch_size=batch_size,
                 shuffle=False,
-                num_workers=4,
+                num_workers=num_workers,
                 pin_memory=True
             )
             test_loader = DataLoader(
                 dataset=test_dataset,
                 batch_size=batch_size,
                 shuffle=False,
-                num_workers=4,
+                num_workers=num_workers,
                 pin_memory=True
             )
 
@@ -538,7 +541,7 @@ def main(args):
     std_test_acc = np.std(best_test_metrics)
 
     print("\n#==================== Final Results ====================")
-    print(f"# Test for {data_flag}")
+    print(f"# Test for {data_flag} using {conv}")
     print(f"# Mean Test Accuracy: {mean_test_acc:.4f}")
     print(f"# Std Test Accuracy:  {std_test_acc:.4f}\n")
 
