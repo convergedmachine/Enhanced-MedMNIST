@@ -233,7 +233,22 @@ class FinetuningScheduler:
             optimizer = self.update_optimizer(optimizer)
             self.current_stage += 1
 
+        # Reaffirm that BatchNorm layers remain trainable
+        self._keep_batch_norm_trainable()            
+
         return optimizer
+    
+    def _keep_batch_norm_trainable(self):
+        """
+        Sets requires_grad=True for all BatchNorm layers to keep them trainable.
+        """
+        # Define BatchNorm layer types
+        bn_types = (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)
+
+        for module in self.model.modules():
+            if isinstance(module, bn_types):
+                for param in module.parameters():
+                    param.requires_grad = True    
 
     def update_optimizer(self, optimizer):
         """
