@@ -36,7 +36,8 @@ class Config:
     FLOAT32_MATMUL_PRECISION = 'high'
     WEIGHTS_PATH = {
         'crossdconv': "../_weights/CDConvR18_RIN.pth",
-        'acsconv': "../_weights/R18_RIN.pth"
+        'acsconv': "../_weights/R18_RIN.pth",
+        'crossd_imagenet': "../_weights/CDConvR18_IN1K.pth"
     }
     DEFAULTS = {
         'data_flag': 'organmnist3d_64',
@@ -78,7 +79,7 @@ torch.set_float32_matmul_precision(Config.FLOAT32_MATMUL_PRECISION)
 # -------------------------------
 # 3. MODEL CREATION
 # -------------------------------
-def create_model(n_classes, conv_opt='imagenet', weights_path=None):
+def create_model(n_classes, conv_opt, weights_path=None):
     """
     Creates a ResNet-18 3D model with optional convolution layer replacements.
 
@@ -96,10 +97,10 @@ def create_model(n_classes, conv_opt='imagenet', weights_path=None):
     model.fc = nn.Linear(num_features, n_classes)  # Modify the final layer
 
     # Handle convolution options
-    if conv_opt == 'crossdconv':
+    if conv_opt == 'crossdconv' or conv_opt == 'crossd_imagenet':
         # Convert to 3D using CrossDConv
         convert2threed(model)
-        weights_to_load = weights_path or Config.WEIGHTS_PATH['crossdconv']
+        weights_to_load = weights_path or Config.WEIGHTS_PATH[conv_opt]
 
         try:
             ckpt = torch.load(weights_to_load, map_location='cpu')
@@ -435,15 +436,11 @@ def train_model(conv_opt, n_classes, train_loader, val_loader, num_epochs, devic
     """
     model = create_model(n_classes, conv_opt=conv_opt, weights_path=weights_path).to(device)
 
-    if conv_opt != 'imagenet':
-        # For conv_opt other than 'imagenet', freeze all layers except the final fully connected layer
-        for name, param in model.named_parameters():
-            if "fc" not in name:
-                param.requires_grad = False
-    else:
-        # For 'imagenet', you might choose to fine-tune the entire model or freeze specific layers
-        print("Training with standard ImageNet weights. Consider freezing layers if necessary.")
-
+    # For conv_opt other than 'imagenet', freeze all layers except the final fully connected layer
+    for name, param in model.named_parameters():
+        if "fc" not in name:
+            param.requires_grad = False
+            
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=0.001)
     scheduler = torch.optim.lr_scheduler.MultiStepLR(

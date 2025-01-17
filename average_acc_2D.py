@@ -33,7 +33,8 @@ class Config:
     FLOAT32_MATMUL_PRECISION = 'high'
     WEIGHTS_PATH = {
         'radimagenet': "../_weights/R18_RIN.pth",
-        'crossdconv': "../_weights/CDConvR18_RIN.pth"
+        'crossdconv': "../_weights/CDConvR18_RIN.pth",
+        'crossd_imagenet': "../_weights/CDConvR18_IN1K.pth"
     }
     DEFAULTS = {
         'data_flag': 'breastmnist_224',
@@ -90,7 +91,7 @@ def create_model(n_classes, conv_opt=False, weights_path=None):
     model.fc = nn.Linear(num_features, n_classes)
 
     if conv_opt in Config.WEIGHTS_PATH:
-        if conv_opt == 'crossdconv':
+        if conv_opt == 'crossdconv' or conv_opt == 'crossd_imagenet':
             replace_conv_layers(model)
         try:
             ckpt = torch.load(weights_path or Config.WEIGHTS_PATH[conv_opt], map_location='cpu')
@@ -415,7 +416,7 @@ def main(args):
         raise FileNotFoundError(f"Data file not found at {path_to_npz}")
 
     data = np.load(path_to_npz)
-    images = data['images'] / 255.0
+    images = (data['images'] - data['images'].min()) / (data['images'].max() - data['images'].min())
     labels_all = data['labels'].squeeze()
 
     # Ensure correct image shape
@@ -437,7 +438,7 @@ def main(args):
     #    mean = images.mean()
     #    std = images.std()
     
-    if args.conv == "imagenet":
+    if args.conv == "imagenet" or args.conv == "crossd_imagenet" :
         mean = [0.485, 0.456, 0.406]
         std = [0.229, 0.224, 0.225]
     else:
