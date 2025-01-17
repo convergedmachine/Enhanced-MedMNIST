@@ -32,8 +32,8 @@ class Config:
     SEED = 42
     FLOAT32_MATMUL_PRECISION = 'high'
     WEIGHTS_PATH = {
-        'radimagenet': "../_weights/R18.pth",
-        'crossdconv': "../_weights/CDConvR18.pth"
+        'radimagenet': "../_weights/R18_RIN.pth",
+        'crossdconv': "../_weights/CDConvR18_RIN.pth"
     }
     DEFAULTS = {
         'data_flag': 'breastmnist_224',
@@ -85,7 +85,7 @@ def create_model(n_classes, conv_opt=False, weights_path=None):
     Returns:
         model (nn.Module): The modified ResNet-18 model.
     """
-    model = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
+    model = resnet18(weights=None)
     num_features = model.fc.in_features
     model.fc = nn.Linear(num_features, n_classes)
 
@@ -107,7 +107,10 @@ def create_model(n_classes, conv_opt=False, weights_path=None):
         except FileNotFoundError:
             print(f"Weight file for '{conv_opt}' not found at {weights_path or Config.WEIGHTS_PATH[conv_opt]}.")
     elif conv_opt:
-        print(f"Unknown conv_opt '{conv_opt}'. Proceeding with standard ResNet-18.")
+        model = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
+        num_features = model.fc.in_features
+        model.fc = nn.Linear(num_features, n_classes)        
+        print(f"Proceeding with standard ResNet-18.")
 
     return model
 

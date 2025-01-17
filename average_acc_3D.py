@@ -35,8 +35,8 @@ class Config:
     SEED = 42
     FLOAT32_MATMUL_PRECISION = 'high'
     WEIGHTS_PATH = {
-        'crossdconv': "../_weights/CDConvR18.pth",
-        'acsconv': "../_weights/R18.pth"
+        'crossdconv': "../_weights/CDConvR18_RIN.pth",
+        'acsconv': "../_weights/R18_RIN.pth"
     }
     DEFAULTS = {
         'data_flag': 'organmnist3d_64',
@@ -91,7 +91,7 @@ def create_model(n_classes, conv_opt='imagenet', weights_path=None):
         model (nn.Module): The modified ResNet-18 3D model.
     """
     # Initialize ResNet-18 with ImageNet weights
-    model = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
+    model = resnet18(weights=None)
     num_features = model.fc.in_features
     model.fc = nn.Linear(num_features, n_classes)  # Modify the final layer
 
@@ -159,6 +159,9 @@ def create_model(n_classes, conv_opt='imagenet', weights_path=None):
             print(f"Error loading ACSConv weights: {e}")
 
     elif conv_opt == 'imagenet':
+        model = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
+        num_features = model.fc.in_features
+        model.fc = nn.Linear(num_features, n_classes)  # Modify the final layer        
         model = ACSConverter(model)
         print("Using 3D ResNet-18 with ImageNet weights.")
     else:
@@ -505,7 +508,6 @@ def main(args):
     data = np.load(path_to_npz)
     images = (data['images'] - data['images'].min()) / (data['images'].max() - data['images'].min())
 
-    images = np.stack([images, images, images], axis=1)
     labels_all = data['labels'].squeeze()
 
     # Ensure correct image shape
@@ -514,7 +516,12 @@ def main(args):
     elif images.ndim == 5 and images.shape[1] == 3:
         pass  # Already handled in ArrayDataset
     elif images.ndim == 5 and images.shape[1] != 3:
-        images = np.transpose(images, [0, 4, 1, 2, 3])  # From (N, D, H, W, C) to (N, C, D, H, W)
+        if images.shape[4] == 3:
+            images = np.transpose(images, [0, 4, 1, 2, 3])  # From (N, D, H, W, C) to (N, C, D, H, W)
+        elif images.shape[1] == 1:
+            images = np.stack([images, images, images], axis=1)
+        else:
+            raise ValueError("Unsupported image shape. Expected 4D or 5D array.")
     else:
         raise ValueError("Unsupported image shape. Expected 4D or 5D array.")
 
