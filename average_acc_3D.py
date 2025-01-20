@@ -197,6 +197,8 @@ class ArrayDataset(Dataset):
         elif self.images.ndim == 5 and self.images.shape[1] == 3:
             # Already in (N, C, D, H, W)
             pass
+        elif self.images.ndim == 5 and self.images.shape[1] == 2:
+            self.images = np.concatenate([self.images, self.images[:,0:1,:,:,:]], axis=1)
         else:
             raise ValueError("Images should have shape (N, C, D, H, W) with C=3 or (N, D, H, W).")
 
@@ -509,14 +511,22 @@ def main(args):
 
     # Ensure correct image shape
     if images.ndim == 4:
-        pass  # Already handled in ArrayDataset
+        N, D, H, W = images.shape
+        # Check if height is greater than width
+        if D > W:
+            images = np.transpose(images, (0, 3, 2, 1))        
+        pass
     elif images.ndim == 5 and images.shape[1] == 3:
+        N, C, D, H, W = images.shape
+        # Check if height is greater than width
+        if D > W:
+            images = np.transpose(images, (0, 3, 2, 1))        
         pass  # Already handled in ArrayDataset
     elif images.ndim == 5 and images.shape[1] != 3:
         if images.shape[4] == 3:
             images = np.transpose(images, [0, 4, 1, 2, 3])  # From (N, D, H, W, C) to (N, C, D, H, W)
-        elif images.shape[1] == 1:
-            images = np.stack([images, images, images], axis=1)
+        elif images.shape[1] == 2:
+            pass
         else:
             raise ValueError("Unsupported image shape. Expected 4D or 5D array.")
     else:
@@ -685,7 +695,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', default=Config.DEFAULTS['batch_size'], type=int,
                         help='Batch size.')
     parser.add_argument('--conv',       default=Config.DEFAULTS['conv'], type=str, 
-                        choices=['crossdconv', 'acsconv', 'imagenet'],
+                        choices=['crossdconv', 'acsconv', 'imagenet', 'crossd_imagenet'],
                         help='Choose convolution option: "crossdconv", "acsconv", or "imagenet".')
     parser.add_argument('--weights_path', default=None, type=str,
                         help='Custom path to weights file if different from default.')
