@@ -1,8 +1,4 @@
 # Enhanced-MedMNIST
-Enhanced-MedMNIST evaluation scripts
-
-```markdown
-# Enhanced-MedMNIST
 
 Enhanced-MedMNIST evaluation scripts
 
